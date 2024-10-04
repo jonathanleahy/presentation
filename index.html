@@ -171,6 +171,16 @@
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
 
+            if (selectedItems.length === 1) {
+                selectedHandle = getResizeHandleAtPoint(x, y, selectedItems[0]);
+                if (selectedHandle && e.ctrlKey) {
+                    isRotating = true;
+                    rotationCenter = getOppositeHandle(selectedHandle, selectedItems[0]);
+                    rotationStartAngle = Math.atan2(y - rotationCenter.y, x - rotationCenter.x);
+                    return;
+                }
+            }
+
             // Check if we're clicking on a resize handle of the selected item
             if (selectedItem) {
                 selectedHandle = getResizeHandleAtPoint(x, y, selectedItem);
@@ -418,57 +428,9 @@
                     const path = sortedPaths[i];
                     
                     if (path.type === 'svg') {
-                        const img = new Image();
-                        img.onload = function() {
-                            ctx.save();
-                            ctx.translate(path.x + path.width / 2, path.y + path.height / 2);
-                            ctx.rotate(path.rotation || 0);
-                            ctx.drawImage(img, -path.width / 2, -path.height / 2, path.width, path.height);
-                            ctx.restore();
-                        };
-                        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(path.content);
+                        drawSvg(path);
                     } else {
-                        const smoothedPath = smoothLine(path.points, smoothness);
-                        
-                        ctx.beginPath();
-                        ctx.moveTo(smoothedPath[0].x, smoothedPath[0].y);
-
-                        let endIndex = smoothedPath.length - 1;
-                        if (isPresenting && pageIndex === currentPageIndex) {
-                            const pathProgress = (animationProgress * sortedPaths.length) - i;
-                            if (pathProgress <= 0) continue;
-                            if (pathProgress < 1) {
-                                endIndex = Math.floor(smoothedPath.length * pathProgress);
-                            }
-                        }
-
-                        for (let j = 1; j < endIndex; j++) {
-                            ctx.quadraticCurveTo(smoothedPath[j].x, smoothedPath[j].y, smoothedPath[j].xc, smoothedPath[j].yc);
-                        }
-
-                        if (endIndex === smoothedPath.length - 1) {
-                            ctx.quadraticCurveTo(
-                                smoothedPath[endIndex].x,
-                                smoothedPath[endIndex].y,
-                                smoothedPath[endIndex].x,
-                                smoothedPath[endIndex].y
-                            );
-                        }
-
-                        if (pageIndex === currentPageIndex) {
-                            ctx.strokeStyle = 'black';
-                            if (i === selectedPathIndex) {
-                                ctx.strokeStyle = 'blue';
-                                ctx.lineWidth = 4;
-                            } else {
-                                ctx.lineWidth = 2;
-                            }
-                        } else {
-                            ctx.strokeStyle = 'darkgrey';
-                            ctx.lineWidth = 1;
-                        }
-
-                        ctx.stroke();
+                        drawPath(path, pageIndex, i, animationProgress);
                     }
                 }
             }
@@ -524,6 +486,152 @@
                 ctx.strokeRect(selectionBoundary.x, selectionBoundary.y, selectionBoundary.width, selectionBoundary.height);
                 ctx.setLineDash([]);
             }
+        }
+
+        function rotateSvg(item, angle, center) {
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
+            
+            // Rotate the top-left corner of the SVG
+            const dx = item.x - center.x;
+            const dy = item.y - center.y;
+            item.x = center.x + dx * cos - dy * sin;
+            item.y = center.y + dx * sin + dy * cos;
+            
+            // Update the rotation property
+            item.rotation = (item.rotation || 0) + angle;
+        }
+
+        function drawSvg(path) {
+            const img = new Image();
+            img.onload = function() {
+                ctx.save();
+                ctx.translate(path.x + path.width / 2, path.y + path.height / 2);
+                ctx.rotate(path.rotation || 0);
+                ctx.drawImage(img, -path.width / 2, -path.height / 2, path.width, path.height);
+                ctx.restore();
+                
+                // Draw selection box if the SVG is selected
+                if (selectedItems.includes(path)) {
+                    ctx.save();
+                    ctx.strokeStyle = 'blue';
+                    ctx.lineWidth = 2;
+                    ctx.translate(path.x + path.width / 2, path.y + path.height / 2);
+                    ctx.rotate(path.rotation || 0);
+                    ctx.strokeRect(-path.width / 2, -path.height / 2, path.width, path.height);
+                    ctx.restore();
+                }
+            };
+            img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(path.content);
+        }
+
+        function rotateSelectedItem(x, y) {
+            const currentAngle = Math.atan2(y - rotationCenter.y, x - rotationCenter.x);
+            const angleChange = currentAngle - rotationStartAngle;
+            
+            for (let item of selectedItems) {
+                if (item.type === 'svg') {
+                    rotateSvg(item, angleChange, rotationCenter);
+                } else {
+                    rotatePath(item, angleChange, rotationCenter);
+                }
+            }
+            
+            // Recalculate the selection boundary based on rotated items
+            selectionBoundary = getSelectionBoundary(selectedItems);
+            
+            rotationStartAngle = currentAngle;
+            redrawCanvas();
+        }
+
+        function rotatePath(item, angle, center) {
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
+            
+            for (let point of item.points) {
+                const dx = point.x - center.x;
+                const dy = point.y - center.y;
+                point.x = center.x + dx * cos - dy * sin;
+                point.y = center.y + dx * sin + dy * cos;
+            }
+        }
+
+        function getOppositeHandle(handle, item) {
+            const bounds = getItemBounds(item);
+            switch (handle) {
+                case 'nw': return { x: bounds.maxX, y: bounds.maxY };
+                case 'ne': return { x: bounds.minX, y: bounds.maxY };
+                case 'sw': return { x: bounds.maxX, y: bounds.minY };
+                case 'se': return { x: bounds.minX, y: bounds.minY };
+            }
+        }
+
+        function getItemBounds(item) {
+            if (item.type === 'svg') {
+                return {
+                    minX: item.x,
+                    minY: item.y,
+                    maxX: item.x + item.width,
+                    maxY: item.y + item.height
+                };
+            } else {
+                return getPathBounds(item.points);
+            }
+        }
+
+        function getPathBounds(points) {
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (let point of points) {
+                minX = Math.min(minX, point.x);
+                minY = Math.min(minY, point.y);
+                maxX = Math.max(maxX, point.x);
+                maxY = Math.max(maxY, point.y);
+            }
+            return { minX, minY, maxX, maxY };
+        }
+
+        function drawPath(path, pageIndex, pathIndex, animationProgress) {
+            const smoothedPath = smoothLine(path.points, smoothness);
+            
+            ctx.beginPath();
+            ctx.moveTo(smoothedPath[0].x, smoothedPath[0].y);
+
+            let endIndex = smoothedPath.length - 1;
+            if (isPresenting && pageIndex === currentPageIndex) {
+                const pathProgress = (animationProgress * allPages[currentPageIndex].paths.length) - pathIndex;
+                if (pathProgress <= 0) return;
+                if (pathProgress < 1) {
+                    endIndex = Math.floor(smoothedPath.length * pathProgress);
+                }
+            }
+
+            for (let j = 1; j < endIndex; j++) {
+                ctx.quadraticCurveTo(smoothedPath[j].x, smoothedPath[j].y, smoothedPath[j].xc, smoothedPath[j].yc);
+            }
+
+            if (endIndex === smoothedPath.length - 1) {
+                ctx.quadraticCurveTo(
+                    smoothedPath[endIndex].x,
+                    smoothedPath[endIndex].y,
+                    smoothedPath[endIndex].x,
+                    smoothedPath[endIndex].y
+                );
+            }
+
+            if (pageIndex === currentPageIndex) {
+                ctx.strokeStyle = 'black';
+                if (selectedItems.includes(path)) {
+                    ctx.strokeStyle = 'blue';
+                    ctx.lineWidth = 4;
+                } else {
+                    ctx.lineWidth = 2;
+                }
+            } else {
+                ctx.strokeStyle = 'darkgrey';
+                ctx.lineWidth = 1;
+            }
+
+            ctx.stroke();
         }
 
         function animateDrawing() {
@@ -663,8 +771,11 @@
                 type: 'svg',
                 x: x,
                 y: y,
+                width: svgSize,
+                height: svgSize,
                 content: starSvg,
-                order: lineCounter++
+                order: lineCounter++,
+                rotation: 0
             };
 
             allPages[currentPageIndex].paths.push(svgObject);
@@ -689,30 +800,6 @@
                 }
             }
             return null;
-        }
-
-        function getItemBounds(item) {
-            if (item.type === 'svg') {
-                return {
-                    minX: item.x,
-                    minY: item.y,
-                    maxX: item.x + item.width,
-                    maxY: item.y + item.height
-                };
-            } else {
-                return getPathBounds(item.points);
-            }
-        }
-
-        function getPathBounds(points) {
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            for (let point of points) {
-                minX = Math.min(minX, point.x);
-                minY = Math.min(minY, point.y);
-                maxX = Math.max(maxX, point.x);
-                maxY = Math.max(maxY, point.y);
-            }
-            return { minX, minY, maxX, maxY };
         }
 
         function getResizeHandleAtPoint(x, y, item) {
@@ -836,6 +923,30 @@
                         itemBounds.minY <= selectionBox.maxY &&
                         itemBounds.maxY >= selectionBox.minY);
             });
+        }
+
+        function updatePageList() {
+            pageListDiv.innerHTML = '';
+            for (let i = 0; i < allPages.length; i++) {
+                const pageDiv = document.createElement('div');
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = i === currentPageIndex;
+                checkbox.disabled = true;
+                
+                const layeredCheckbox = document.createElement('input');
+                layeredCheckbox.type = 'checkbox';
+                layeredCheckbox.checked = !allPages[i].isClean;
+                layeredCheckbox.addEventListener('change', () => toggleLayeredPage(i));
+
+                const label = document.createElement('label');
+                label.textContent = `Page ${i + 1}`;
+
+                pageDiv.appendChild(checkbox);
+                pageDiv.appendChild(layeredCheckbox);
+                pageDiv.appendChild(label);
+                pageListDiv.appendChild(pageDiv);
+            }
         }
 
         canvas.addEventListener('mousedown', startDrawing);
