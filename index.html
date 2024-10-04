@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Page Drawing App with Sequential Line Animation</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            text-align: center;
+        }
+        canvas {
+            border: 1px solid #000;
+            background-color: white;
+        }
+        button {
+            margin: 10px 5px 0;
+            padding: 5px 10px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        #smoothnessValue, #pageInfo, #cleanPageInfo {
+            font-size: 16px;
+            margin-top: 10px;
+        }
+        #presentationMode {
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <canvas id="drawingCanvas" width="500" height="400"></canvas>
+        <br>
+        <button id="minusBtn">-</button>
+        <button id="plusBtn">+</button>
+        <button id="clearBtn">Clear</button>
+        <button id="deleteBtn" disabled>Delete Selected</button>
+        <button id="prevPageBtn">Previous Page</button>
+        <button id="nextPageBtn">Next Page</button>
+        <button id="newPageBtn">New Page</button>
+        <button id="toggleCleanBtn">Toggle Clean Page</button>
+        <button id="addSvgBtn">Add Star SVG</button>
+        <div>
+            <input type="checkbox" id="presentationMode">
+            <label for="presentationMode">Presentation Mode</label>
+        </div>
+        <div id="smoothnessValue">Smoothness: 5</div>
+        <div id="pageInfo">Page 1 of 1</div>
+        <div id="cleanPageInfo">Clean Page: Yes</div>
+        <div id="pageList"></div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('drawingCanvas');
+        const ctx = canvas.getContext('2d');
+        const clearBtn = document.getElementById('clearBtn');
+        const minusBtn = document.getElementById('minusBtn');
+        const plusBtn = document.getElementById('plusBtn');
+        const deleteBtn = document.getElementById('deleteBtn');
+        const prevPageBtn = document.getElementById('prevPageBtn');
+        const nextPageBtn = document.getElementById('nextPageBtn');
+        const newPageBtn = document.getElementById('newPageBtn');
+        const toggleCleanBtn = document.getElementById('toggleCleanBtn');
+        const presentationModeCheckbox = document.getElementById('presentationMode');
+        const smoothnessValueDiv = document.getElementById('smoothnessValue');
+        const pageInfoDiv = document.getElementById('pageInfo');
+        const cleanPageInfoDiv = document.getElementById('cleanPageInfo');
+        const addSvgBtn = document.getElementById('addSvgBtn');
+        let isDrawing = false;
+        let currentPoints = [];
+        let allPages = [{ paths: [], isClean: true }]; // Array of page objects
+        let currentPageIndex = 0;
+        let smoothness = 5; // Initial smoothness value
+        let selectedPathIndex = -1;
+        let startPoint = null;
+        let lastPoint = null;
+        let isPresenting = false;
+        let lineCounter = 0;
+        let selectedItem = null;
+        let isResizing = false;
+        let selectedHandle = null;
+        let resizeStartX, resizeStartY;
+        let originalItemBounds;
+        let isSelecting = false;
+        let selectionStart = { x: 0, y: 0 };
+        let selectionEnd = { x: 0, y: 0 };
+        let selectedItems = [];
+        let isDragging = false;
+        let dragStartX, dragStartY;
+        let selectionBoundary = null;
+
+        function getItemBoundingBox(item) {
+            if (item.type === 'svg') {
+                return {
+                    x: item.x,
+                    y: item.y,
+                    width: item.width,
+                    height: item.height
+                };
+            } else {
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                for (let point of item.points) {
+                    minX = Math.min(minX, point.x);
+                    minY = Math.min(minY, point.y);
+                    maxX = Math.max(maxX, point.x);
+                    maxY = Math.max(maxY, point.y);
+                }
+                return {
+                    x: minX,
+                    y: minY,
+                    width: maxX - minX,
+                    height: maxY - minY
+                };
+            }
+        }
+
+        function isPointInBoundingBox(x, y, boundingBox) {
+            return (x >= boundingBox.x && x <= boundingBox.x + boundingBox.width &&
+                    y >= boundingBox.y && y <= boundingBox.y + boundingBox.height);
+        }
+
+        function getSelectionBoundary(items) {
+            if (items.length === 0) return null;
+            
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            
+            for (let item of items) {
+                const box = getItemBoundingBox(item);
+                minX = Math.min(minX, box.x);
+                minY = Math.min(minY, box.y);
+                maxX = Math.max(maxX, box.x + box.width);
+                maxY = Math.max(maxY, box.y + box.height);
+            }
+            
+            return {
+                x: minX,
+                y: minY,
+                width: maxX - minX,
+                height: maxY - minY
+            };
+        }
+
+        function startDrawing(e) {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            // Check if we're clicking on a resize handle of the selected item
+            if (selectedItem) {
+                selectedHandle = getResizeHandleAtPoint(x, y, selectedItem);
+                if (selectedHandle) {
+                    isResizing = true;
+                    resizeStartX = x;
+                    resizeStartY = y;
+                    originalItemBounds = getItemBounds(selectedItem);
+                    return;
+                }
+            }
+
+            // Check if we're clicking within the selection boundary
+            if (selectionBoundary && isPointInBoundingBox(x, y, selectionBoundary)) {
+                // Start dragging the entire selection
+                isDragging = true;
+                dragStartX = x;
+                dragStartY = y;
+                return;
+            }
+
+            // Check if we're clicking within the bounding box of an existing item
+            const clickedItem = allPages[currentPageIndex].paths.find(item => isPointInBoundingBox(x, y, getItemBoundingBox(item)));
+            if (clickedItem) {
+                if (e.shiftKey) {
+                    // Toggle item selection when Shift is pressed
+                    const index = selectedItems.indexOf(clickedItem);
+                    if (index > -1) {
+                        selectedItems.splice(index, 1);
+                    } else {
+                        selectedItems.push(clickedItem);
+                    }
+                } else {
+                    // Select only the clicked item when Shift is not pressed
+                    selectedItems = [clickedItem];
+                }
+                selectedItem = selectedItems.length === 1 ? selectedItems[0] : null;
+                deleteBtn.disabled = selectedItems.length === 0;
+                
+                // Update selection boundary
+                selectionBoundary = getSelectionBoundary(selectedItems);
+                
+                // Start dragging
+                isDragging = true;
+                dragStartX = x;
+                dragStartY = y;
+                
+                redrawCanvas();
+                return;
+            }
+
+            // Clear selection if clicking outside
+            selectedItems = [];
+            selectedItem = null;
+            selectionBoundary = null;
+            deleteBtn.disabled = true;
+
+            // Start selection box if Shift is pressed, otherwise start drawing
+            if (e.shiftKey) {
+                isSelecting = true;
+                selectionStart = { x, y };
+                selectionEnd = { x, y };
+                if (!e.ctrlKey && !e.metaKey) {
+                    selectedItems = [];
+                }
+                selectedItem = null;
+                deleteBtn.disabled = true;
+            } else {
+                isDrawing = true;
+                startPoint = {x, y};
+                lastPoint = {x, y};
+                currentPoints = [startPoint];
+                ctx.beginPath();
+                ctx.moveTo(x, y);
+            }
+        }
+
+        function draw(e) {
+            if (!isDrawing && !isResizing && !isSelecting && !isDragging) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            if (isDragging) {
+                const dx = x - dragStartX;
+                const dy = y - dragStartY;
+                
+                for (let item of selectedItems) {
+                    if (item.type === 'svg') {
+                        item.x += dx;
+                        item.y += dy;
+                    } else {
+                        for (let point of item.points) {
+                            point.x += dx;
+                            point.y += dy;
+                        }
+                    }
+                }
+                
+                // Update selection boundary
+                if (selectionBoundary) {
+                    selectionBoundary.x += dx;
+                    selectionBoundary.y += dy;
+                }
+                
+                dragStartX = x;
+                dragStartY = y;
+                redrawCanvas();
+                return;
+            }
+            
+            if (isResizing && selectedItem && selectedHandle) {
+                resizeSelectedItem(x, y);
+                redrawCanvas();
+                return;
+            }
+            
+            if (isSelecting) {
+                selectionEnd = { x, y };
+                updateSelection();
+                redrawCanvas();
+                return;
+            }
+            
+            if (isDrawing) {
+                let newPoint = {x, y};
+                currentPoints.push(newPoint);
+                lastPoint = newPoint;
+                
+                redrawCanvas();
+                
+                ctx.beginPath();
+                ctx.moveTo(currentPoints[0].x, currentPoints[0].y);
+                for (let i = 1; i < currentPoints.length; i++) {
+                    ctx.lineTo(currentPoints[i].x, currentPoints[i].y);
+                }
+                ctx.stroke();
+            }
+        }
+
+        function stopDrawing() {
+            if (isDragging) {
+                isDragging = false;
+                dragStartX = dragStartY = null;
+                redrawCanvas();
+                return;
+            }
+
+            if (isResizing) {
+                isResizing = false;
+                selectedHandle = null;
+                resizeStartX = resizeStartY = null;
+                originalItemBounds = null;
+                redrawCanvas();
+                return;
+            }
+
+            if (isSelecting) {
+                isSelecting = false;
+                if (selectedItems.length === 1) {
+                    selectedItem = selectedItems[0];
+                } else {
+                    selectedItem = null;
+                }
+                deleteBtn.disabled = selectedItems.length === 0;
+                redrawCanvas();
+                return;
+            }
+
+            if (isDrawing) {
+                isDrawing = false;
+                if (currentPoints.length > 1) {
+                    allPages[currentPageIndex].paths.push({
+                        points: [...currentPoints],
+                        order: lineCounter++
+                    });
+                }
+                startPoint = null;
+                lastPoint = null;
+                redrawCanvas();
+            }
+        }
+
+        function smoothLine(points, smoothness) {
+            if (points.length < 3) return points;
+
+            let smoothedPoints = [];
+            smoothedPoints.push({x: points[0].x, y: points[0].y});
+
+            for (let i = 1; i < points.length - 1; i += smoothness) {
+                const xc = (points[i].x + points[i + 1].x) / 2;
+                const yc = (points[i].y + points[i + 1].y) / 2;
+                smoothedPoints.push({x: points[i].x, y: points[i].y, xc, yc});
+            }
+
+            smoothedPoints.push({x: points[points.length - 1].x, y: points[points.length - 1].y});
+
+            return smoothedPoints;
+        }
+
+        function redrawCanvas(animationProgress = 1) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            let lastCleanPageIndex = currentPageIndex;
+            while (lastCleanPageIndex > 0 && !allPages[lastCleanPageIndex].isClean) {
+                lastCleanPageIndex--;
+            }
+
+            for (let pageIndex = lastCleanPageIndex; pageIndex <= currentPageIndex; pageIndex++) {
+                const page = allPages[pageIndex];
+                const sortedPaths = page.paths.sort((a, b) => a.order - b.order);
+                
+                for (let i = 0; i < sortedPaths.length; i++) {
+                    const path = sortedPaths[i];
+                    
+                    if (path.type === 'svg') {
+                        const img = new Image();
+                        img.onload = function() {
+                            ctx.drawImage(img, path.x, path.y);
+                        };
+                        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(path.content);
+                    } else {
+                        const smoothedPath = smoothLine(path.points, smoothness);
+                        
+                        ctx.beginPath();
+                        ctx.moveTo(smoothedPath[0].x, smoothedPath[0].y);
+
+                        let endIndex = smoothedPath.length - 1;
+                        if (isPresenting && pageIndex === currentPageIndex) {
+                            const pathProgress = (animationProgress * sortedPaths.length) - i;
+                            if (pathProgress <= 0) continue;
+                            if (pathProgress < 1) {
+                                endIndex = Math.floor(smoothedPath.length * pathProgress);
+                            }
+                        }
+
+                        for (let j = 1; j < endIndex; j++) {
+                            ctx.quadraticCurveTo(smoothedPath[j].x, smoothedPath[j].y, smoothedPath[j].xc, smoothedPath[j].yc);
+                        }
+
+                        if (endIndex === smoothedPath.length - 1) {
+                            ctx.quadraticCurveTo(
+                                smoothedPath[endIndex].x,
+                                smoothedPath[endIndex].y,
+                                smoothedPath[endIndex].x,
+                                smoothedPath[endIndex].y
+                            );
+                        }
+
+                        if (pageIndex === currentPageIndex) {
+                            ctx.strokeStyle = 'black';
+                            if (i === selectedPathIndex) {
+                                ctx.strokeStyle = 'blue';
+                                ctx.lineWidth = 4;
+                            } else {
+                                ctx.lineWidth = 2;
+                            }
+                        } else {
+                            ctx.strokeStyle = 'darkgrey';
+                            ctx.lineWidth = 1;
+                        }
+
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            // Draw current line if we're in the middle of drawing
+            if (isDrawing) {
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(currentPoints[0].x, currentPoints[0].y);
+                for (let i = 1; i < currentPoints.length; i++) {
+                    ctx.lineTo(currentPoints[i].x, currentPoints[i].y);
+                }
+                ctx.stroke();
+            }
+
+            // Draw selection box
+            if (isSelecting) {
+                ctx.strokeStyle = 'blue';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]);
+                ctx.strokeRect(
+                    selectionStart.x,
+                    selectionStart.y,
+                    selectionEnd.x - selectionStart.x,
+                    selectionEnd.y - selectionStart.y
+                );
+                ctx.setLineDash([]);
+            }
+
+            // Highlight selected items
+            for (let item of selectedItems) {
+                const bounds = getItemBounds(item);
+                ctx.strokeStyle = 'blue';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(bounds.minX, bounds.minY, bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+            }
+
+            // Draw resize handles for single selected item
+            if (selectedItems.length === 1) {
+                const handles = getResizeHandles(selectedItems[0]);
+                for (let handle of handles) {
+                    ctx.fillStyle = 'blue';
+                    ctx.fillRect(handle.x - 5, handle.y - 5, 10, 10);
+                }
+            }
+
+            // Draw selection boundary
+            if (selectionBoundary) {
+                ctx.strokeStyle = 'blue';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([5, 5]);
+                ctx.strokeRect(selectionBoundary.x, selectionBoundary.y, selectionBoundary.width, selectionBoundary.height);
+                ctx.setLineDash([]);
+            }
+        }
+
+        function animateDrawing() {
+            const startTime = Date.now();
+            const duration = 2000; // 2 seconds
+
+            function animate() {
+                const currentTime = Date.now();
+                const elapsed = currentTime - startTime;
+                const progress = Math.min(elapsed / duration, 1);
+
+                redrawCanvas(progress);
+
+                if (progress < 1) {
+                    requestAnimationFrame(animate);
+                }
+            }
+
+            animate();
+        }
+
+        function clearCanvas() {
+            allPages[currentPageIndex].paths = [];
+            currentPoints = [];
+            selectedPathIndex = -1;
+            deleteBtn.disabled = true;
+            lineCounter = 0;
+            redrawCanvas();
+        }
+
+        function changeSmoothness(delta) {
+            smoothness = Math.max(1, Math.min(20, smoothness + delta));
+            smoothnessValueDiv.textContent = `Smoothness: ${smoothness}`;
+            redrawCanvas();
+        }
+
+        function findPathAtPoint(x, y) {
+            for (let i = allPages[currentPageIndex].paths.length - 1; i >= 0; i--) {
+                const path = allPages[currentPageIndex].paths[i];
+                for (let point of path.points) {
+                    const distance = Math.sqrt((x - point.x) ** 2 + (y - point.y) ** 2);
+                    if (distance < 5) {  // 5 pixel tolerance
+                        return i;
+                    }
+                }
+            }
+            return -1;
+        }
+
+        function deleteSelectedPath() {
+            if (selectedPathIndex !== -1) {
+                allPages[currentPageIndex].paths.splice(selectedPathIndex, 1);
+                selectedPathIndex = -1;
+                deleteBtn.disabled = true;
+                redrawCanvas();
+            }
+        }
+
+        function newPage() {
+            allPages.push({ paths: [], isClean: allPages.length === 0 });
+            currentPageIndex = allPages.length - 1;
+            selectedPathIndex = -1;
+            deleteBtn.disabled = true;
+            lineCounter = 0;
+            updatePageInfo();
+            updateCleanPageInfo();
+            redrawCanvas();
+        }
+
+        function nextPage() {
+            if (currentPageIndex < allPages.length - 1) {
+                currentPageIndex++;
+                selectedPathIndex = -1;
+                deleteBtn.disabled = true;
+                lineCounter = allPages[currentPageIndex].paths.reduce((max, path) => Math.max(max, path.order), -1) + 1;
+                updatePageInfo();
+                updateCleanPageInfo();
+                if (isPresenting) {
+                    animateDrawing();
+                } else {
+                    redrawCanvas();
+                }
+            }
+        }
+
+        function prevPage() {
+            if (currentPageIndex > 0) {
+                currentPageIndex--;
+                selectedPathIndex = -1;
+                deleteBtn.disabled = true;
+                lineCounter = allPages[currentPageIndex].paths.reduce((max, path) => Math.max(max, path.order), -1) + 1;
+                updatePageInfo();
+                updateCleanPageInfo();
+                redrawCanvas();
+            }
+        }
+
+        function toggleCleanPage() {
+            allPages[currentPageIndex].isClean = !allPages[currentPageIndex].isClean;
+            updateCleanPageInfo();
+            redrawCanvas();
+        }
+
+        function updatePageInfo() {
+            pageInfoDiv.textContent = `Page ${currentPageIndex + 1} of ${allPages.length}`;
+        }
+
+        function updateCleanPageInfo() {
+            cleanPageInfoDiv.textContent = `Clean Page: ${allPages[currentPageIndex].isClean ? 'Yes' : 'No'}`;
+        }
+
+        function togglePresentationMode() {
+            isPresenting = presentationModeCheckbox.checked;
+            if (isPresenting) {
+                animateDrawing();
+            } else {
+                redrawCanvas();     
+            }
+        }
+
+        function addSvgToCurrentPage() {
+            const svgSize = 50;
+            const x = Math.random() * (canvas.width - svgSize);
+            const y = Math.random() * (canvas.height - svgSize);
+
+            const starSvg = `
+                <svg width="${svgSize}" height="${svgSize}" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" fill="gold" stroke="black" stroke-width="1"/>
+                </svg>
+            `;
+
+            const svgObject = {
+                type: 'svg',
+                x: x,
+                y: y,
+                content: starSvg,
+                order: lineCounter++
+            };
+
+            allPages[currentPageIndex].paths.push(svgObject);
+            redrawCanvas();
+        }
+
+        function findItemAtPoint(x, y) {
+            for (let i = allPages[currentPageIndex].paths.length - 1; i >= 0; i--) {
+                const item = allPages[currentPageIndex].paths[i];
+                if (item.type === 'svg') {
+                    if (x >= item.x && x <= item.x + item.width &&
+                        y >= item.y && y <= item.y + item.height) {
+                        return item;
+                    }
+                } else {
+                    for (let point of item.points) {
+                        const distance = Math.sqrt((x - point.x) ** 2 + (y - point.y) ** 2);
+                        if (distance < 5) {  // 5 pixel tolerance
+                            return item;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        function getItemBounds(item) {
+            if (item.type === 'svg') {
+                return {
+                    minX: item.x,
+                    minY: item.y,
+                    maxX: item.x + item.width,
+                    maxY: item.y + item.height
+                };
+            } else {
+                return getPathBounds(item.points);
+            }
+        }
+
+        function getPathBounds(points) {
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (let point of points) {
+                minX = Math.min(minX, point.x);
+                minY = Math.min(minY, point.y);
+                maxX = Math.max(maxX, point.x);
+                maxY = Math.max(maxY, point.y);
+            }
+            return { minX, minY, maxX, maxY };
+        }
+
+        function getResizeHandleAtPoint(x, y, item) {
+            const handles = getResizeHandles(item);
+            for (let handle of handles) {
+                if (x >= handle.x - 5 && x <= handle.x + 5 &&
+                    y >= handle.y - 5 && y <= handle.y + 5) {
+                    return handle.position;
+                }
+            }
+            return null;
+        }
+
+        function getResizeHandles(item) {
+            const bounds = getItemBounds(item);
+            return [
+                { x: bounds.minX, y: bounds.minY, position: 'nw' },
+                { x: bounds.maxX, y: bounds.minY, position: 'ne' },
+                { x: bounds.minX, y: bounds.maxY, position: 'sw' },
+                { x: bounds.maxX, y: bounds.maxY, position: 'se' }
+            ];
+        }
+
+        function resizeSelectedItem(x, y) {
+            if (selectedItem.type === 'svg') {
+                resizeSvg(selectedItem, x, y);
+            } else {
+                resizePath(selectedItem, x, y);
+            }
+            redrawCanvas();
+        }
+
+        function resizeSvg(item, x, y) {
+            switch (selectedHandle) {
+                case 'nw':
+                    item.width += item.x - x;
+                    item.height += item.y - y;
+                    item.x = x;
+                    item.y = y;
+                    break;
+                case 'ne':
+                    item.width = x - item.x;
+                    item.height += item.y - y;
+                    item.y = y;
+                    break;
+                case 'sw':
+                    item.width += item.x - x;
+                    item.height = y - item.y;
+                    item.x = x;
+                    break;
+                case 'se':
+                    item.width = x - item.x;
+                    item.height = y - item.y;
+                    break;
+            }
+            // Ensure minimum size
+            if (item.width < 10) {
+                item.x -= 10 - item.width;
+                item.width = 10;
+            }
+            if (item.height < 10) {
+                item.y -= 10 - item.height;
+                item.height = 10;
+            }
+        }
+
+        function resizePath(item, x, y) {
+            const bounds = getItemBounds(item);
+            let newMinX = bounds.minX, newMinY = bounds.minY, newMaxX = bounds.maxX, newMaxY = bounds.maxY;
+
+            switch (selectedHandle) {
+                case 'nw':
+                    newMinX = x;
+                    newMinY = y;
+                    break;
+                case 'ne':
+                    newMaxX = x;
+                    newMinY = y;
+                    break;
+                case 'sw':
+                    newMinX = x;
+                    newMaxY = y;
+                    break;
+                case 'se':
+                    newMaxX = x;
+                    newMaxY = y;
+                    break;
+            }
+
+            // Ensure minimum size
+            if (newMaxX - newMinX < 10) {
+                if (selectedHandle === 'nw' || selectedHandle === 'sw') newMinX = newMaxX - 10;
+                else newMaxX = newMinX + 10;
+            }
+            if (newMaxY - newMinY < 10) {
+                if (selectedHandle === 'nw' || selectedHandle === 'ne') newMinY = newMaxY - 10;
+                else newMaxY = newMinY + 10;
+            }
+
+            const scaleX = (newMaxX - newMinX) / (bounds.maxX - bounds.minX);
+            const scaleY = (newMaxY - newMinY) / (bounds.maxY - bounds.minY);
+
+            for (let point of item.points) {
+                point.x = newMinX + (point.x - bounds.minX) * scaleX;
+                point.y = newMinY + (point.y - bounds.minY) * scaleY;
+            }
+        }
+
+        function updateSelection() {
+            const selectionBox = {
+                minX: Math.min(selectionStart.x, selectionEnd.x),
+                minY: Math.min(selectionStart.y, selectionEnd.y),
+                maxX: Math.max(selectionStart.x, selectionEnd.x),
+                maxY: Math.max(selectionStart.y, selectionEnd.y)
+            };
+
+            selectedItems = allPages[currentPageIndex].paths.filter(item => {
+                const itemBounds = getItemBounds(item);
+                return (itemBounds.minX <= selectionBox.maxX &&
+                        itemBounds.maxX >= selectionBox.minX &&
+                        itemBounds.minY <= selectionBox.maxY &&
+                        itemBounds.maxY >= selectionBox.minY);
+            });
+        }
+
+        canvas.addEventListener('mousedown', startDrawing);
+        canvas.addEventListener('mousemove', draw);
+        canvas.addEventListener('mouseup', stopDrawing);
+        canvas.addEventListener('mouseout', stopDrawing);
+        clearBtn.addEventListener('click', clearCanvas);
+        minusBtn.addEventListener('click', () => changeSmoothness(-1));
+        plusBtn.addEventListener('click', () => changeSmoothness(1));
+        deleteBtn.addEventListener('click', deleteSelectedPath);
+        newPageBtn.addEventListener('click', newPage);
+        nextPageBtn.addEventListener('click', nextPage);
+        prevPageBtn.addEventListener('click', prevPage);
+        toggleCleanBtn.addEventListener('click', toggleCleanPage);
+        presentationModeCheckbox.addEventListener('change', togglePresentationMode);
+        addSvgBtn.addEventListener('click', addSvgToCurrentPage);
+
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        updatePageInfo();
+        updateCleanPageInfo();
+    </script>
+</body>
+</html>
