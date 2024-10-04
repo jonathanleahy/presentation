@@ -53,7 +53,7 @@
             <input type="checkbox" id="presentationMode">
             <label for="presentationMode">Presentation Mode</label>
         </div>
-        <div id="smoothnessValue">Smoothness: 5</div>
+        <div id="smoothnessValue">Smoothness: 2</div>
         <div id="pageInfo">Page 1 of 1</div>
         <div id="cleanPageInfo">Clean Page: Yes</div>
         <div id="pageList"></div>
@@ -79,7 +79,7 @@
         let currentPoints = [];
         let allPages = [{ paths: [], isClean: true }]; // Array of page objects
         let currentPageIndex = 0;
-        let smoothness = 5; // Initial smoothness value
+        let smoothness = 2; // Initial smoothness value
         let selectedPathIndex = -1;
         let startPoint = null;
         let lastPoint = null;
@@ -97,6 +97,9 @@
         let isDragging = false;
         let dragStartX, dragStartY;
         let selectionBoundary = null;
+        let isRotating = false;
+        let rotationCenter = null;
+        let rotationStartAngle = 0;
 
         function getItemBoundingBox(item) {
             if (item.type === 'svg') {
@@ -158,11 +161,19 @@
             if (selectedItem) {
                 selectedHandle = getResizeHandleAtPoint(x, y, selectedItem);
                 if (selectedHandle) {
-                    isResizing = true;
-                    resizeStartX = x;
-                    resizeStartY = y;
-                    originalItemBounds = getItemBounds(selectedItem);
-                    return;
+                    if (e.ctrlKey) {
+                        // Start rotation
+                        isRotating = true;
+                        rotationCenter = getOppositeHandle(selectedHandle, selectedItem);
+                        rotationStartAngle = Math.atan2(y - rotationCenter.y, x - rotationCenter.x);
+                        return;
+                    } else {
+                        isResizing = true;
+                        resizeStartX = x;
+                        resizeStartY = y;
+                        originalItemBounds = getItemBounds(selectedItem);
+                        return;
+                    }
                 }
             }
 
@@ -232,7 +243,7 @@
         }
 
         function draw(e) {
-            if (!isDrawing && !isResizing && !isSelecting && !isDragging) return;
+            if (!isDrawing && !isResizing && !isSelecting && !isDragging && !isRotating) return;
             const rect = canvas.getBoundingClientRect();
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
@@ -278,6 +289,15 @@
                 return;
             }
             
+            if (isRotating && selectedItem && rotationCenter) {
+                const currentAngle = Math.atan2(y - rotationCenter.y, x - rotationCenter.x);
+                const angleChange = currentAngle - rotationStartAngle;
+                rotateSelectedItem(angleChange);
+                rotationStartAngle = currentAngle;
+                redrawCanvas();
+                return;
+            }
+            
             if (isDrawing) {
                 let newPoint = {x, y};
                 currentPoints.push(newPoint);
@@ -319,6 +339,14 @@
                     selectedItem = null;
                 }
                 deleteBtn.disabled = selectedItems.length === 0;
+                redrawCanvas();
+                return;
+            }
+
+            if (isRotating) {
+                isRotating = false;
+                rotationCenter = null;
+                rotationStartAngle = 0;
                 redrawCanvas();
                 return;
             }
@@ -780,6 +808,56 @@
                         itemBounds.minY <= selectionBox.maxY &&
                         itemBounds.maxY >= selectionBox.minY);
             });
+        }
+
+        function getOppositeHandle(handle, item) {
+            const bounds = getItemBounds(item);
+            switch (handle) {
+                case 'nw': return { x: bounds.maxX, y: bounds.maxY };
+                case 'ne': return { x: bounds.minX, y: bounds.maxY };
+                case 'sw': return { x: bounds.maxX, y: bounds.minY };
+                case 'se': return { x: bounds.minX, y: bounds.minY };
+            }
+        }
+
+        function rotateSelectedItem(angle) {
+            if (selectedItem.type === 'svg') {
+                rotateSvg(selectedItem, angle);
+            } else {
+                rotatePath(selectedItem, angle);
+            }
+        }
+
+        function rotateSvg(item, angle) {
+            const centerX = rotationCenter.x;
+            const centerY = rotationCenter.y;
+            
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
+            
+            const newX = centerX + (item.x - centerX) * cos - (item.y - centerY) * sin;
+            const newY = centerY + (item.x - centerX) * sin + (item.y - centerY) * cos;
+            
+            item.x = newX;
+            item.y = newY;
+            
+            // Update item's rotation property (you may need to add this property to your SVG items)
+            item.rotation = (item.rotation || 0) + angle;
+        }
+
+        function rotatePath(item, angle) {
+            const centerX = rotationCenter.x;
+            const centerY = rotationCenter.y;
+            
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
+            
+            for (let point of item.points) {
+                const dx = point.x - centerX;
+                const dy = point.y - centerY;
+                point.x = centerX + dx * cos - dy * sin;
+                point.y = centerY + dx * sin + dy * cos;
+            }
         }
 
         canvas.addEventListener('mousedown', startDrawing);
