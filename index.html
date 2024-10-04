@@ -34,6 +34,19 @@
         #presentationMode {
             margin-top: 10px;
         }
+        #pageList {
+            margin-top: 20px;
+            text-align: left;
+        }
+        #pageList div {
+            margin: 5px 0;
+        }
+        #pageList input[type="checkbox"] {
+            margin-right: 5px;
+        }
+        #pageList label {
+            margin-left: 5px;
+        }
     </style>
 </head>
 <body>
@@ -75,6 +88,7 @@
         const pageInfoDiv = document.getElementById('pageInfo');
         const cleanPageInfoDiv = document.getElementById('cleanPageInfo');
         const addSvgBtn = document.getElementById('addSvgBtn');
+        const pageListDiv = document.getElementById('pageList');
         let isDrawing = false;
         let currentPoints = [];
         let allPages = [{ paths: [], isClean: true }]; // Array of page objects
@@ -97,6 +111,9 @@
         let isDragging = false;
         let dragStartX, dragStartY;
         let selectionBoundary = null;
+        let isRotating = false;
+        let rotationCenter = null;
+        let rotationStartAngle = 0;
 
         function getItemBoundingBox(item) {
             if (item.type === 'svg') {
@@ -158,11 +175,20 @@
             if (selectedItem) {
                 selectedHandle = getResizeHandleAtPoint(x, y, selectedItem);
                 if (selectedHandle) {
-                    isResizing = true;
-                    resizeStartX = x;
-                    resizeStartY = y;
-                    originalItemBounds = getItemBounds(selectedItem);
-                    return;
+                    if (e.ctrlKey) {
+                        // Start rotation
+                        isRotating = true;
+                        rotationCenter = getOppositeHandle(selectedHandle, selectedItem);
+                        rotationStartAngle = Math.atan2(y - rotationCenter.y, x - rotationCenter.x);
+                        return;
+                    } else {
+                        // Start resizing
+                        isResizing = true;
+                        resizeStartX = x;
+                        resizeStartY = y;
+                        originalItemBounds = getItemBounds(selectedItem);
+                        return;
+                    }
                 }
             }
 
@@ -232,10 +258,16 @@
         }
 
         function draw(e) {
-            if (!isDrawing && !isResizing && !isSelecting && !isDragging) return;
+            if (!isDrawing && !isResizing && !isSelecting && !isDragging && !isRotating) return;
             const rect = canvas.getBoundingClientRect();
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
+            
+            if (isRotating && selectedItem) {
+                rotateSelectedItem(x, y);
+                redrawCanvas();
+                return;
+            }
             
             if (isDragging) {
                 const dx = x - dragStartX;
@@ -295,6 +327,14 @@
         }
 
         function stopDrawing() {
+            if (isRotating) {
+                isRotating = false;
+                rotationCenter = null;
+                rotationStartAngle = 0;
+                redrawCanvas();
+                return;
+            }
+
             if (isDragging) {
                 isDragging = false;
                 dragStartX = dragStartY = null;
@@ -372,7 +412,11 @@
                     if (path.type === 'svg') {
                         const img = new Image();
                         img.onload = function() {
-                            ctx.drawImage(img, path.x, path.y);
+                            ctx.save();
+                            ctx.translate(path.x + path.width / 2, path.y + path.height / 2);
+                            ctx.rotate(path.rotation || 0);
+                            ctx.drawImage(img, -path.width / 2, -path.height / 2, path.width, path.height);
+                            ctx.restore();
                         };
                         img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(path.content);
                     } else {
@@ -539,6 +583,7 @@
             updatePageInfo();
             updateCleanPageInfo();
             redrawCanvas();
+            updatePageList();
         }
 
         function nextPage() {
@@ -554,6 +599,7 @@
                 } else {
                     redrawCanvas();
                 }
+                updatePageList();
             }
         }
 
@@ -566,6 +612,7 @@
                 updatePageInfo();
                 updateCleanPageInfo();
                 redrawCanvas();
+                updatePageList();
             }
         }
 
@@ -573,6 +620,7 @@
             allPages[currentPageIndex].isClean = !allPages[currentPageIndex].isClean;
             updateCleanPageInfo();
             redrawCanvas();
+            updatePageList();
         }
 
         function updatePageInfo() {
@@ -782,6 +830,103 @@
             });
         }
 
+        function getOppositeHandle(handle, item) {
+            const bounds = getItemBounds(item);
+            switch (handle) {
+                case 'nw': return { x: bounds.maxX, y: bounds.maxY };
+                case 'ne': return { x: bounds.minX, y: bounds.maxY };
+                case 'sw': return { x: bounds.maxX, y: bounds.minY };
+                case 'se': return { x: bounds.minX, y: bounds.minY };
+            }
+        }
+
+        function rotateSelectedItem(x, y) {
+            const currentAngle = Math.atan2(y - rotationCenter.y, x - rotationCenter.x);
+            const angleChange = currentAngle - rotationStartAngle;
+            
+            if (selectedItem.type === 'svg') {
+                rotateSvg(selectedItem, angleChange, rotationCenter);
+            } else {
+                rotatePath(selectedItem, angleChange, rotationCenter);
+            }
+            
+            // Rotate the selection boundary
+            if (selectionBoundary) {
+                rotateRect(selectionBoundary, angleChange, rotationCenter);
+            }
+            
+            rotationStartAngle = currentAngle;
+        }
+
+        function rotateSvg(item, angle, center) {
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
+            
+            // Rotate the top-left corner of the SVG
+            const dx = item.x - center.x;
+            const dy = item.y - center.y;
+            item.x = center.x + dx * cos - dy * sin;
+            item.y = center.y + dx * sin + dy * cos;
+            
+            // Update the rotation property
+            item.rotation = (item.rotation || 0) + angle;
+        }
+
+        function rotatePath(item, angle, center) {
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
+            
+            for (let point of item.points) {
+                const dx = point.x - center.x;
+                const dy = point.y - center.y;
+                point.x = center.x + dx * cos - dy * sin;
+                point.y = center.y + dx * sin + dy * cos;
+            }
+        }
+
+        function rotateRect(rect, angle, center) {
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
+            
+            // Rotate the top-left corner of the rectangle
+            const dx = rect.x - center.x;
+            const dy = rect.y - center.y;
+            rect.x = center.x + dx * cos - dy * sin;
+            rect.y = center.y + dx * sin + dy * cos;
+            
+            // We don't need to update width and height for a simple rotation
+        }
+
+        function updatePageList() {
+            pageListDiv.innerHTML = '';
+            for (let i = 0; i < allPages.length; i++) {
+                const pageDiv = document.createElement('div');
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = i === currentPageIndex;
+                checkbox.disabled = true;
+                
+                const layeredCheckbox = document.createElement('input');
+                layeredCheckbox.type = 'checkbox';
+                layeredCheckbox.checked = !allPages[i].isClean;
+                layeredCheckbox.addEventListener('change', () => toggleLayeredPage(i));
+
+                const label = document.createElement('label');
+                label.textContent = `Page ${i + 1}`;
+
+                pageDiv.appendChild(checkbox);
+                pageDiv.appendChild(layeredCheckbox);
+                pageDiv.appendChild(label);
+                pageListDiv.appendChild(pageDiv);
+            }
+        }
+
+        function toggleLayeredPage(index) {
+            allPages[index].isClean = !allPages[index].isClean;
+            updatePageList();
+            redrawCanvas();
+        }
+
         canvas.addEventListener('mousedown', startDrawing);
         canvas.addEventListener('mousemove', draw);
         canvas.addEventListener('mouseup', stopDrawing);
@@ -804,6 +949,7 @@
 
         updatePageInfo();
         updateCleanPageInfo();
+        updatePageList();
     </script>
 </body>
 </html>
