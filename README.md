@@ -1,1 +1,3 @@
 # presentation
+
+Not my code. I'm seeing if I can get a working app using Cursor and what the archecture of the app ends up like.......
